@@ -1,0 +1,157 @@
+name: Build Aseprite for Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      aseprite_version:
+        description: 'Aseprite version tag (leave empty for latest)'
+        required: false
+        default: ''
+
+jobs:
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Enable Long Paths
+        run: git config --system core.longpaths true
+
+      - name: Install Build Tools
+        run: choco install cmake ninja -y --no-progress
+
+      - name: Fetch Version & Source URL
+        id: get-version
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $specifiedVersion = "${{ github.event.inputs.aseprite_version }}"
+          
+          if (-not [string]::IsNullOrEmpty($specifiedVersion)) {
+              Write-Host "Using specified version: $specifiedVersion"
+              $tag = $specifiedVersion
+              $downloadUrl = "https://github.com/aseprite/aseprite/releases/download/$tag/Aseprite-$tag-Source.zip"
+          } else {
+              Write-Host "Fetching latest release from GitHub API..."
+              $response = Invoke-RestMethod -Uri "https://api.github.com/repos/aseprite/aseprite/releases/latest" -UseBasicParsing
+              $tag = $response.tag_name
+              $asset = $response.assets | Where-Object { $_.name -like '*Source.zip' }
+              if ($asset) {
+                  $downloadUrl = $asset.browser_download_url
+              } else {
+                  $downloadUrl = "https://github.com/aseprite/aseprite/archive/refs/tags/$tag.zip"
+              }
+              Write-Host "Latest version: $tag"
+          }
+          
+          Write-Host "Download URL: $downloadUrl"
+          echo "version=$tag" >> $env:GITHUB_OUTPUT
+          echo "download_url=$downloadUrl" >> $env:GITHUB_OUTPUT
+
+      - name: Download & Extract Aseprite Source
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $downloadUrl = "${{ steps.get-version.outputs.download_url }}"
+          $aseZip = "aseprite_src.zip"
+          $aseDir = "aseprite"
+          $tempExtract = "temp_ext"
+
+          Write-Host "Downloading Aseprite source..."
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $aseZip -UseBasicParsing
+
+          Write-Host "Extracting Aseprite source..."
+          New-Item -ItemType Directory -Force -Path $tempExtract | Out-Null
+          Expand-Archive -Force $aseZip $tempExtract
+          
+          New-Item -ItemType Directory -Force -Path $aseDir | Out-Null
+          Get-ChildItem $tempExtract | ForEach-Object {
+              Copy-Item -Path "$($_.FullName)\*" -Destination $aseDir -Recurse -Force
+          }
+
+          Remove-Item -Recurse -Force $tempExtract
+          Remove-Item -Force $aseZip
+          Write-Host "Aseprite source ready."
+
+      - name: Download & Extract Skia
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $skiaZip = "skia.zip"
+          $skiaDir = "skia"
+          
+          Write-Host "Downloading Skia..."
+          Invoke-WebRequest -Uri "https://github.com/aseprite/skia/releases/download/m124-08a5439a6b/Skia-Windows-Release-x64.zip" -OutFile $skiaZip -UseBasicParsing
+          
+          Write-Host "Extracting Skia..."
+          Expand-Archive -Force $skiaZip -DestinationPath $skiaDir
+          
+          $targetOutDir = Join-Path $skiaDir "out\Release-x64"
+          if (!(Test-Path $targetOutDir)) {
+              New-Item -ItemType Directory -Force -Path $targetOutDir | Out-Null
+          }
+          
+          Write-Host "Downloading icudtl.dat..."
+          Invoke-WebRequest -Uri "https://github.com/aseprite/skia/releases/download/m124-08a5439a6b/icudtl.dat" -OutFile (Join-Path $targetOutDir "icudtl.dat") -UseBasicParsing
+          
+          Write-Host "Skia configured successfully!"
+
+      - name: Initialize MSVC Environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure Build
+        shell: powershell
+        run: |
+          mkdir build -Force
+          cd build
+          cmake -G Ninja `
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo `
+            -DLAF_BACKEND=skia `
+            -DSKIA_DIR="$env:GITHUB_WORKSPACE\skia" `
+            -DSKIA_LIBRARY_DIR="$env:GITHUB_WORKSPACE\skia\out\Release-x64" `
+            -DSKIA_LIBRARY="$env:GITHUB_WORKSPACE\skia\out\Release-x64\skia.lib" `
+            -DENABLE_SCRIPTING=OFF `
+            -DENABLE_UPDATER=OFF `
+            -DENABLE_TESTS=OFF `
+            "$env:GITHUB_WORKSPACE\aseprite"
+
+      - name: Compile
+        run: |
+          cd build
+          ninja -j 4
+
+      - name: Create Portable Package
+        shell: powershell
+        run: |
+          $version = "${{ steps.get-version.outputs.version }}"
+          cd build\bin
+          "# This file is here so Aseprite behaves as a portable program" | Out-File -FilePath "aseprite.ini" -Encoding ASCII
+          Compress-Archive -Path * -DestinationPath "$env:GITHUB_WORKSPACE\Aseprite-$version-Windows.zip"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aseprite-${{ steps.get-version.outputs.version }}-Windows
+          path: Aseprite-${{ steps.get-version.outputs.version }}-Windows.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: success()
+        with:
+          tag_name: ${{ steps.get-version.outputs.version }}
+          name: Aseprite ${{ steps.get-version.outputs.version }} (Windows)
+          body: |
+            Aseprite ${{ steps.get-version.outputs.version }} - Windows Build
+            
+            **Download:**
+            - Aseprite-${{ steps.get-version.outputs.version }}-Windows.zip
+            
+            **Note:** This build is for personal use only. Please support the developers by purchasing Aseprite at https://www.aseprite.org/
+          files: Aseprite-*-Windows.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
