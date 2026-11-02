@@ -55,13 +55,25 @@ jobs:
       - name: Download & Extract Skia
         shell: powershell
         run: |
-          Invoke-WebRequest -Uri "https://github.com/aseprite/skia/releases/download/m124-08a5439a6b/Skia-Windows-Release-x64.zip" -OutFile "skia.zip" -UseBasicParsing
-          Expand-Archive -Force "skia.zip" "skia"
+          $skiaZip = "skia.zip"
+          $skiaDir = "skia"
           
-          # Download icudtl.dat (required for ICU support)
-          mkdir skia\out\Release-x64 -Force
-          Invoke-WebRequest -Uri "https://github.com/aseprite/skia/releases/download/m124-08a5439a6b/icudtl.dat" -OutFile "skia/out/Release-x64/icudtl.dat" -UseBasicParsing
-          Write-Host "Skia extracted successfully with icudtl.dat"
+          Write-Host "Baixando o Skia..."
+          Invoke-WebRequest -Uri "https://github.com/aseprite/skia/releases/download/m124-08a5439a6b/Skia-Windows-Release-x64.zip" -OutFile $skiaZip -UseBasicParsing
+          
+          Write-Host "Extraindo o Skia..."
+          Expand-Archive -Force $skiaZip -DestinationPath $skiaDir
+          
+          # Garante que a pasta out/Release-x64 existe
+          $targetOutDir = Join-Path $skiaDir "out\Release-x64"
+          if (!(Test-Path $targetOutDir)) {
+              New-Item -ItemType Directory -Force -Path $targetOutDir | Out-Null
+          }
+          
+          Write-Host "Baixando o icudtl.dat..."
+          Invoke-WebRequest -Uri "https://github.com/aseprite/skia/releases/download/m124-08a5439a6b/icudtl.dat" -OutFile (Join-Path $targetOutDir "icudtl.dat") -UseBasicParsing
+          
+          Write-Host "Skia configurado com sucesso!"
 
       - name: Initialize MSVC Environment
         uses: ilammy/msvc-dev-cmd@v1
